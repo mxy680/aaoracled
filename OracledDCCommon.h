@@ -28,9 +28,13 @@
 // NOT need this fix — it runs unsandboxed (no-sandbox entitlement), so both
 // path spellings already resolve to the same file for it.
 //
-// Contents: a single line, the App ID (<TeamID>.<BundleID>) to force for the
-// NEXT App Attest call devicecheckd handles. Presence of the file = override
-// active; absence = pass through to the real (audit-token-derived) identity.
+// Contents: TWO lines. Line 1: the App ID (<TeamID>.<BundleID>) to force
+// for the NEXT App Attest call devicecheckd handles. Line 2 (optional —
+// a legacy single-line file still parses fine): the App Attest environment
+// ("development" or "production") to present in the forged identity's
+// entitlements, per OracledForcedEnvironment() below. Presence of line 1 =
+// override active; absence of the file = pass through to the real
+// (audit-token-derived) identity.
 #define kOracledForgePath \
     jbroot(@"/var/mobile/Library/Preferences/xyz.regulad.aaoracled.forge-appid.txt")
 
@@ -55,5 +59,26 @@ static inline NSString *OracledForcedAppID(void) {
     // hard way — see AGENTS.md history).
     NSString *s = [NSString stringWithContentsOfFile:kOracledForgePath
                                              encoding:NSUTF8StringEncoding error:nil];
-    return s.length ? s : nil;
+    // Line 1 ONLY. The file may now carry a second line (the environment,
+    // see OracledForcedEnvironment()); returning the whole file contents
+    // here would smuggle the newline + environment string into the forced
+    // App ID itself, breaking every identity check downstream.
+    NSString *appId = [s componentsSeparatedByString:@"\n"].firstObject;
+    return appId.length ? appId : nil;
+}
+
+// Line 2 of the forge file: the App Attest environment to present in the
+// forged identity's entitlements (consumed by OracledFakeBundleRecordFor in
+// Tweak.x, which feeds devicecheckd's environment/AAGUID decision).
+// "production" selects the production AAGUID; anything else - including an
+// absent second line, i.e. a legacy single-line file - reads as development,
+// matching the entitlement value hardcoded there before environments were
+// plumbed through (2026-10-10: a live environment:"production" POST /keys
+// came back with the appattestdevelop AAGUID, which is what prompted this).
+static inline NSString *OracledForcedEnvironment(void) {
+    NSString *s = [NSString stringWithContentsOfFile:kOracledForgePath
+                                              encoding:NSUTF8StringEncoding error:nil];
+    NSArray *lines = [s componentsSeparatedByString:@"\n"];
+    return (lines.count > 1 && [lines[1] isEqualToString:@"production"])
+        ? @"production" : @"development";
 }

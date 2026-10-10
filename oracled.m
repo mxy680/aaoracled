@@ -59,8 +59,17 @@ static NSString *const kOwnLabel = @"xyz.regulad.aaoracled (no fixed App ID — 
 // Tells the injected devicecheckd tweak which App ID to present for the NEXT
 // call. Cleared immediately after so an un-forged process elsewhere on the
 // device isn't affected by a stale override.
-static void setForgeAppId(NSString *appId) {
-    [appId writeToFile:kOracledForgePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+static void setForgeAppId(NSString *appId, NSString *environment) {
+    // Two lines: App ID, then environment (see OracledDCCommon.h). The
+    // second line is what makes POST /keys' `environment` field real: the
+    // devicecheckd tweak presents it in the forged identity's entitlements,
+    // which is what devicecheckd reads to pick the attestation environment
+    // (and thus the AAGUID Apple stamps). Before this, the field was only
+    // echoed in the 201 response and the tweak always presented
+    // "development" — a live environment:"production" mint came back with
+    // the appattestdevelop AAGUID (2026-10-10).
+    [[NSString stringWithFormat:@"%@\n%@", appId, environment]
+        writeToFile:kOracledForgePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     chmod(kOracledForgePath.UTF8String, 0666);
 }
 static void clearForgeAppId(void) {
@@ -160,12 +169,16 @@ static Resp handleCreateKey(NSDictionary *body) {
     NSString *env = body[@"environment"] ?: @"development";
     NSData *cdh = b64d(body[@"clientDataHash"]);
     if (![appId isKindOfClass:NSString.class]) return Err(400, @"bad_request", @"appId required");
+    if (![env isKindOfClass:NSString.class] ||
+        ![@[@"development", @"production"] containsObject:env])
+        return Err(400, @"bad_request", @"environment must be \"development\" or \"production\"");
     if (cdh.length != 32) return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
 
     // Forge lever: tells the injected devicecheckd tweak (Tweak.x)
-    // which App ID to present for these calls, regardless of our own
-    // process's actual (ad-hoc, unentitled) code-signing identity.
-    setForgeAppId(appId);
+    // which App ID AND environment to present for these calls, regardless
+    // of our own process's actual (ad-hoc, unentitled) code-signing
+    // identity.
+    setForgeAppId(appId, env);
     NSError *err = nil;
     NSString *keyId = dcGenerateKey(&err);
     if (!keyId) { clearForgeAppId(); return Err(502, @"generateKey_failed", fullErrorDump(err)); }
@@ -186,8 +199,16 @@ static Resp handleSignKey(NSString *key, NSDictionary *body) {
     NSData *cdh = b64d(body[@"clientDataHash"]);
     if (key.length == 0)
         return Err(400, @"bad_request", @"key required in path (from GET /keys)");
-    if (cdh.length != 32)
-        return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
+    // Arbitrary length, not just 32 bytes: the tweak's raw-label sign path
+    // (OracledHandleSignArbitraryKey) signs whatever bytes it is handed with
+    // the SEP key (kSecKeyAlgorithmECDSASignatureMessageX962SHA256), so
+    // full App Attest assertion messages (authData || clientDataHash,
+    // typically 69 bytes) work here too — the old 32-byte check was a
+    // web-layer assumption inherited from clientDataHash conventions, and was
+    // the only thing rejecting them (2026-10-10). Upper bound is purely
+    // defensive; the HTTP body reader itself has no cap of its own.
+    if (cdh.length == 0 || cdh.length > 4096)
+        return Err(400, @"bad_request", @"clientDataHash must be 1..4096 bytes (base64)");
 
     NSString *sentinelKeyId = [kOracledRawLabelSignPrefix stringByAppendingString:key];
     NSError *err = nil;

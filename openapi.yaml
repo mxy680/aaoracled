@@ -251,6 +251,12 @@ components:
         App Attest environment. Selects the AAGUID Apple stamps into authData
         (`appattestdevelop` vs `appattest`).
 
+        Plumbed through to the forged identity's
+        `com.apple.developer.devicecheck.appattest-environment` entitlement
+        via the forge file's second line (2026-10-10). Before that, the
+        field was only echoed in the response and every mint was
+        development-stamped regardless of what was requested.
+
     AppId:
       type: string
       pattern: '^[A-Z0-9]{10}\.[A-Za-z0-9.\-]+$'
@@ -306,7 +312,13 @@ components:
       properties:
         clientDataHash:
           allOf: [{ $ref: "#/components/schemas/Base64" }]
-          description: Arbitrary 32-byte hash to sign directly (no App Attest semantics).
+          description: >-
+            Arbitrary bytes to sign directly (no App Attest semantics),
+            1..4096 bytes. Historically required to be exactly 32 bytes; the
+            tweak's raw-label sign path always handled arbitrary input, so the
+            cap is now lifted (2026-10-10) — a full assertion message
+            (`authData || clientDataHash`, typically 69 bytes) can be signed
+            here to assemble a complete assertion client-side.
       required: [clientDataHash]
 
     SignResponse:

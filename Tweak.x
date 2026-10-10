@@ -389,10 +389,15 @@ static id OracledFakeBundleRecordFor(NSString *forcedAppId) {
     // Plausible entitlements for the forged identity — App Attest capability
     // "on", matching what a real eligibility check reads off an entitled
     // app's record (com.apple.developer.devicecheck.appattest-environment).
+    // The environment value now follows the forge file's line 2
+    // (OracledForcedEnvironment(), written by oracled.m from POST /keys'
+    // `environment` field) — it was a hardcoded @"development" before, which
+    // was the ONLY thing deciding the AAGUID environment (a live
+    // environment:"production" mint came back appattestdevelop, 2026-10-10).
     objc_setAssociatedObject(fake, kEntitlementsKey, @{
         @"application-identifier": forcedAppId,
         @"com.apple.developer.team-identifier": team,
-        @"com.apple.developer.devicecheck.appattest-environment": @"development",
+        @"com.apple.developer.devicecheck.appattest-environment": OracledForcedEnvironment(),
     }, OBJC_ASSOCIATION_RETAIN);
     return fake;
 }
