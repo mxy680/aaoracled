@@ -525,6 +525,15 @@ static id OracledFakeBundleRecordFor(NSString *forcedAppId) {
 #define AAI_STATIC_getAllCredentialKeychainLabels    0x1c32d27d0UL
 #define AAI_STATIC_copy_keychain_item                0x1c32ce19cUL
 #define AAI_STATIC_deleteCredentialKeychainWithLabel 0x1c32d2728UL
+// generateEnvironmentByAppSigning(audit_token_t *) -> int.
+// 0 == development, 1 == production. This single return value decides the
+// environment baked into the credential keychain label at generateKey time
+// AND the AAGUID Apple stamps at attestKey time. Located 2026-10-10 by
+// disassembling AppAttest_AppAttestation_CreateKey and naming its `bl`
+// targets via DebugSymbol.fromAddress; the 0/1 mapping was then confirmed by
+// overriding the return live with Frida and watching the minted label flip
+// from `=p:` to `=d:`. See AGENTS.md "Environment selection".
+#define AAI_STATIC_generateEnvironmentByAppSigning   0x1c32d1244UL
 
 typedef id (*OracledGetAllCredentialKeychainLabelsFn)(void);
 typedef long (*OracledCopyKeychainItemFn)(id service, id label, int *status, void **out);
@@ -551,6 +560,41 @@ static intptr_t OracledAppAttestInternalSlide(void) {
 }
 
 #define AAI_LIVE(staticAddr) ((void *)((uintptr_t)(staticAddr) + OracledAppAttestInternalSlide()))
+
+#pragma mark - Environment forgery (dev vs prod / the AAGUID)
+
+// Declared by hand rather than via <substrate.h>, matching how this file
+// already handles libSandy_applyProfile — ElleKit exports the Substrate
+// symbol, and declaring just what's used avoids a header dependency for one
+// function.
+extern void MSHookFunction(void *symbol, void *replace, void **result);
+
+typedef int (*OracledGenerateEnvironmentFn)(void *auditToken);
+static OracledGenerateEnvironmentFn gOrigGenerateEnvironment = NULL;
+
+// NOTE: this is the FIRST place this project hooks (rather than merely calls)
+// a function inside the dyld shared cache. If MSHookFunction can't patch a
+// shared-cache text page here, the fallback is to steer the record path
+// instead — the fake bundle record's -isProfileValidated already decides
+// dev-vs-prod as a side effect (returning NO reaches the production branch).
+// That fallback needs no new mechanism but couples environment selection to
+// overrides that exist only to prevent a crash, so it is strictly worse.
+static int OracledGenerateEnvironmentReplacement(void *auditToken) {
+    NSString *forced = OracledForcedEnvironment();
+    if (!forced) {
+        // Not armed (no forge plist, or no/unrecognized environment key):
+        // behave exactly as stock. This matters more than it looks — the
+        // override is GLOBAL and UNSCOPED, so every other app on the device
+        // minting a key while we're loaded lands here too. Passing through
+        // unless explicitly armed is what keeps App A's unforged baseline
+        // (and everyone else's keys) honest.
+        return gOrigGenerateEnvironment(auditToken);
+    }
+    int forcedValue = [forced isEqualToString:@"production"] ? 1 : 0;
+    NSLog(@"[OracledDCPatch] generateEnvironmentByAppSigning FORCED -> %d (%@)",
+          forcedValue, forced);
+    return forcedValue;
+}
 
 // Sentinels smuggled through the existing Assert XPC completion channel —
 // same trick AppAttestInternal's own hidden `__debug_aa_kc_list__`/
@@ -712,4 +756,25 @@ static void OracledHandleDeleteArbitraryKey(NSString *label, id completion) {
     gSandyResult = h ? libSandy_applyProfile("OracledDCPatch") : -1;
     NSLog(@"[OracledDCPatch] loaded into %@, dlopen=%p, libSandy_applyProfile = %d",
           NSProcessInfo.processInfo.processName, h, gSandyResult);
+
+    // Environment forgery. Resolved through dyld's own reported slide, same
+    // as every other AppAttestInternal address here. Logged loudly because a
+    // failure to install is otherwise invisible: the hook simply never fires
+    // and `environment` silently reverts to whatever devicecheckd decides —
+    // precisely the "config surface that lies" failure this work exists to
+    // remove. Verify with GET /keys: the label's p/d character is the ground
+    // truth, and needs no attestation or network round trip to read.
+    uintptr_t envSlide = OracledAppAttestInternalSlide();
+    if (envSlide == 0) {
+        NSLog(@"[OracledDCPatch] WARNING: AppAttestInternal slide unresolved; "
+              @"environment forgery NOT installed");
+    } else {
+        void *target = AAI_LIVE(AAI_STATIC_generateEnvironmentByAppSigning);
+        MSHookFunction(target, (void *)OracledGenerateEnvironmentReplacement,
+                       (void **)&gOrigGenerateEnvironment);
+        NSLog(@"[OracledDCPatch] generateEnvironmentByAppSigning hook: target=%p "
+              @"slide=%p orig=%p -> %@", target, (void *)envSlide,
+              (void *)gOrigGenerateEnvironment,
+              gOrigGenerateEnvironment ? @"INSTALLED" : @"FAILED (orig is NULL)");
+    }
 }

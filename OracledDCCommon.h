@@ -58,13 +58,11 @@
 // Keys inside the forge plist. Shared by both sides — never re-spell these as
 // literals in oracled.m or Tweak.x (see the drift lesson in AGENTS.md).
 static NSString *const kOracledForgeKeyAppID = @"appId";
-// RESERVED, not yet consumed. The App Attest environment is NOT selected by
-// any entitlement devicecheckd reads off the caller — confirmed by live trace
-// on 2026-10-10 (iPad5,1 / 19H422): across isSupported and generateKey,
-// `com.apple.developer.devicecheck.appattest-environment` is never read from
-// the caller's SecTask, and -entitlements is never sent to the bundle record
-// at all. Nothing should write or read this key until the real lever is
-// identified, so that the plist never advertises a knob that does nothing.
+// The App Attest environment to force ("development" or "production"), read
+// by OracledForcedEnvironment() below and applied by Tweak.x's hook on
+// generateEnvironmentByAppSigning. See AGENTS.md "Environment selection" for
+// why that function — and not any entitlement or bundle-record field — is the
+// real lever.
 static NSString *const kOracledForgeKeyEnvironment = @"environment";
 
 // Sentinels smuggled through Assert's existing keyId param (same channel
@@ -102,4 +100,27 @@ static inline NSString *OracledForcedAppID(void) {
     appId = [appId stringByTrimmingCharactersInSet:
                  NSCharacterSet.whitespaceAndNewlineCharacterSet];
     return appId.length ? appId : nil;
+}
+
+// The forced App Attest environment, or nil for "don't override — let
+// devicecheckd decide as it normally would".
+//
+// Returns ONLY one of @"development" / @"production" / nil. Anything else in
+// the plist (a typo, a number, a JSON null that became NSNull) maps to nil
+// rather than silently defaulting to a valid-looking value, because this
+// override is GLOBAL at the devicecheckd level: a garbage value that
+// defaulted to "development" would quietly re-stamp the environment of every
+// other app's key minted while the file exists. nil is the only safe
+// interpretation of "I don't understand this".
+static inline NSString *OracledForcedEnvironment(void) {
+    NSDictionary *forge = [NSDictionary dictionaryWithContentsOfFile:kOracledForgePath];
+    if (![forge isKindOfClass:NSDictionary.class]) return nil;
+
+    NSString *env = forge[kOracledForgeKeyEnvironment];
+    if (![env isKindOfClass:NSString.class]) return nil;
+    env = [[env stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if ([env isEqualToString:@"production"]) return @"production";
+    if ([env isEqualToString:@"development"]) return @"development";
+    return nil;
 }

@@ -59,7 +59,7 @@ static NSString *const kOwnLabel = @"xyz.regulad.aaoracled (no fixed App ID — 
 // Tells the injected devicecheckd tweak which App ID to present for the NEXT
 // call. Cleared immediately after so an un-forged process elsewhere on the
 // device isn't affected by a stale override.
-static void setForgeAppId(NSString *appId) {
+static void setForgeAppId(NSString *appId, NSString *environment) {
     // Written as a binary plist (see OracledDCCommon.h for the key names and
     // for why the path keeps its historical `.txt` spelling). Binary rather
     // than XML purely so a partially-flushed file cannot look like a valid
@@ -68,7 +68,8 @@ static void setForgeAppId(NSString *appId) {
     // override", which is the safe direction.
     NSError *err = nil;
     NSData *data = [NSPropertyListSerialization
-        dataWithPropertyList:@{ kOracledForgeKeyAppID: appId }
+        dataWithPropertyList:@{ kOracledForgeKeyAppID: appId,
+                                kOracledForgeKeyEnvironment: environment }
                       format:NSPropertyListBinaryFormat_v1_0
                      options:0
                        error:&err];
@@ -167,6 +168,22 @@ static NSString *b64e(NSData *d) { return [d base64EncodedStringWithOptions:0]; 
 // forge state at all); create still does, since minting under a
 // caller-chosen appId is the actual forgery primitive.
 
+// The environment baked into a credential label, or nil if the label doesn't
+// match the expected shape.
+//
+// AppAttestInternal encodes the environment as a single character immediately
+// after the first base64 component's `=` padding: `aa:<b64>=d:<b64>=:...` for
+// development, `...=p:...` for production. This is readable with no
+// attestation, no network and no CA involvement, which makes it the cheapest
+// possible check that an environment override actually took effect — the one
+// that would have caught PR #1's non-functional plumbing in a single request.
+static NSString *environmentFromLabel(NSString *label) {
+    if (![label isKindOfClass:NSString.class]) return nil;
+    if ([label rangeOfString:@"=d:"].location != NSNotFound) return @"development";
+    if ([label rangeOfString:@"=p:"].location != NSNotFound) return @"production";
+    return nil;
+}
+
 static Resp handleListKeys(void) {
     NSData *dummyHash = [NSMutableData dataWithLength:32];
     NSError *err = nil;
@@ -177,7 +194,20 @@ static Resp handleListKeys(void) {
     if (![parsed isKindOfClass:NSDictionary.class]) {
         return Err(502, @"list_keys_bad_response", jsonErr ? jsonErr.localizedDescription : @"non-JSON response");
     }
-    return R(200, parsed);
+
+    // Enrich the tweak's raw label list: each entry becomes
+    // {key, environment}. `environment` is null for a label whose shape we
+    // don't recognize rather than guessed at — an unknown label layout is
+    // worth seeing as unknown.
+    NSArray *raw = parsed[@"keys"];
+    if (![raw isKindOfClass:NSArray.class]) return R(200, parsed);
+    NSMutableArray *entries = [NSMutableArray arrayWithCapacity:raw.count];
+    for (NSString *label in raw) {
+        NSString *env = environmentFromLabel(label);
+        [entries addObject:@{ @"key": label ?: @"",
+                              @"environment": env ?: NSNull.null }];
+    }
+    return R(200, @{ @"keys": entries });
 }
 
 static Resp handleCreateKey(NSDictionary *body) {
@@ -199,10 +229,15 @@ static Resp handleCreateKey(NSDictionary *body) {
         return Err(400, @"bad_request", @"environment must be \"development\" or \"production\"");
     if (cdh.length != 32) return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
 
-    // Forge lever: tells the injected devicecheckd tweak (Tweak.x)
-    // which App ID to present for these calls, regardless of our own
-    // process's actual (ad-hoc, unentitled) code-signing identity.
-    setForgeAppId(appId);
+    // Forge lever: tells the injected devicecheckd tweak (Tweak.x) which App
+    // ID to present AND which environment to force for these calls,
+    // regardless of our own process's actual (ad-hoc, unentitled)
+    // code-signing identity. Both generateKey and attestKey happen inside
+    // this window: the environment is burned into the credential's keychain
+    // label at generateKey time and into the AAGUID at attestKey time, so the
+    // override has to stay armed across both — which it does, since
+    // clearForgeAppId() runs only after dcAttest returns.
+    setForgeAppId(appId, env);
     NSError *err = nil;
     NSString *keyId = dcGenerateKey(&err);
     if (!keyId) { clearForgeAppId(); return Err(502, @"generateKey_failed", fullErrorDump(err)); }
@@ -265,8 +300,15 @@ static Resp route(NSString *method, NSString *path, NSDictionary *body) {
     if ([path isEqualToString:@"/health"] && [method isEqualToString:@"GET"]) {
         NSError *supErr = nil;
         BOOL supported = [svc() _isSupportedReturningError:&supErr];
+        // `defaultEnvironment: "development"` used to be hardcoded here. It
+        // was right only by accident, and it is now the wrong concept
+        // outright: the environment is chosen per call by devicecheckd (from
+        // the caller's bundle record, or its entitlement when there is no
+        // record), and POST /keys can force either one. There is no default
+        // to report, so report what can actually be honored instead.
         NSMutableDictionary *r = [@{@"ok": @YES, @"appAttestSupported": @(supported),
-                                     @"defaultEnvironment": @"development"} mutableCopy];
+                                     @"supportedEnvironments": @[@"development", @"production"],
+                                     @"environmentForgery": @YES} mutableCopy];
         if (supErr) r[@"appAttestUnsupportedReason"] = fullErrorDump(supErr);
         return R(200, r);
     }
