@@ -33,12 +33,26 @@ disclosed to Apple before any public presentation of this work.
 
 ## Scope constraints
 
-1. **Only ever attest against Parker's own Apple Developer Team ID** (see
-   `.claude/ENVIRONMENT.md` for the concrete value used in this project's
-   own testing) and App/Bundle IDs Parker has created under that team, plus
-   the deliberate negative-control identities used for the
-   identity-legitimacy matrix (a never-registered bundle; a random fake
-   team) — never target an identity belonging to anyone else.
+1. **Only ever attest against an Apple Developer Team ID you are
+   authorized to use.** For *this project's own* testing that means
+   Parker's team (see `.claude/ENVIRONMENT.md` for the concrete value) and
+   App/Bundle IDs Parker has created under it, plus the deliberate
+   negative-control identities used for the identity-legitimacy matrix (a
+   never-registered bundle; a random fake team).
+
+   `aaoracled` is a published tool, so this constraint is about
+   authorization, not about one specific team. A contributor or downstream
+   user may hold a *different* Team ID they are legitimately authorized to
+   exercise it against — their own team, an employer's, or one named in a
+   red-team engagement — and that is their call to make and their
+   authorization to hold, not something this repo can grant or verify.
+   What stays non-negotiable: never target an identity you have no
+   authorization for. When a contribution's testing narrative rests on an
+   authorization that isn't visible in the diff (e.g. a PR reporting a
+   mint under a team that isn't Parker's), that claim is the contributor's
+   to substantiate — don't assume malice, and don't assume permission
+   either; just get it on the record in the thread before the work is
+   treated as validated.
 2. **Only ever point the oracle at a relying-party server Parker controls.**
    Never send attestations/assertions produced by this tool to a third
    party's production backend, even "just to see."
