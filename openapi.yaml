@@ -130,6 +130,10 @@ paths:
         attestation carrying that App ID's rpIdHash regardless of what this
         process is legitimately provisioned for (the A-E matrix).
 
+        As a special case, `clientDataHash: "sha256(keyId)"` (the literal
+        string) derives the hash from the minted key's own ID — see the
+        `CreateKeyRequest` schema.
+
         The response is a one-time snapshot of what was just minted — it is
         not stored. The new key shows up in a subsequent `GET /keys` like any
         other, addressed by its own opaque label, not by the `keyId` returned
@@ -327,11 +331,20 @@ components:
         appId: { $ref: "#/components/schemas/AppId" }
         environment: { $ref: "#/components/schemas/Environment" }
         clientDataHash:
-          allOf: [{ $ref: "#/components/schemas/Base64" }]
+          oneOf:
+            - allOf: [{ $ref: "#/components/schemas/Base64" }]
+            - type: string
+              enum: ["sha256(keyId)"]
           description: |
-            The 32-byte SHA-256 hash the attestation is bound to (typically
-            `SHA256(server_challenge)`). The relying party computes this;
-            aaoracled passes it straight to `attestKey`.
+            Either a 32-byte SHA-256 hash the attestation is bound to
+            (typically `SHA256(server_challenge)`; the relying party computes
+            this and aaoracled passes it straight to `attestKey`), or the
+            literal string `"sha256(keyId)"`: derive the hash from the keyId
+            `generateKey` just returned — `SHA256(utf8(keyId))` — for apps
+            that attest over their own key ID instead of a server challenge
+            (the hash can't be known before the key exists, so the daemon
+            computes it between `generateKey` and `attestKey`). The 201
+            response echoes the hash actually used as `clientDataHash`.
       required: [appId, clientDataHash]
 
     CreateKeyResponse:
@@ -350,7 +363,13 @@ components:
           allOf: [{ $ref: "#/components/schemas/Base64" }]
           description: CBOR `apple-appattest` attestation object, base64-encoded.
         counter: { type: integer, const: 0 }
-      required: [keyId, appId, environment, attestation, counter]
+        clientDataHash:
+          allOf: [{ $ref: "#/components/schemas/Base64" }]
+          description: >-
+            The 32-byte hash the attestation was actually bound to: the
+            caller-supplied value, or the derived SHA256(utf8(keyId)) in
+            `"sha256(keyId)"` mode. Lets the caller confirm the binding.
+      required: [keyId, appId, environment, attestation, counter, clientDataHash]
 
     SignRequest:
       type: object

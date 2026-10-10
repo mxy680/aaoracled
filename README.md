@@ -63,6 +63,17 @@ curl -s -X POST http://127.0.0.1:8181/keys \
   -d "{\"appId\": \"ABCDE12345.com.example.myapp\", \"environment\": \"development\", \"clientDataHash\": \"$CDH\"}"
 ```
 
+If the relying party's app attests over its own key ID instead of a server
+challenge (clientDataHash = SHA256 of the keyId, which can't be known before
+the key exists), pass the literal string instead and the daemon derives it
+after `generateKey`:
+
+```bash
+curl -s -X POST http://127.0.0.1:8181/keys \
+  -H 'Content-Type: application/json' \
+  -d "{\"appId\": \"ABCDE12345.com.example.myapp\", \"environment\": \"production\", \"clientDataHash\": \"sha256(keyId)\"}"
+```
+
 List every App Attest key resident on the device (not just ones `aaoracled`
 itself minted — see Vulnerability & Mitigation below):
 

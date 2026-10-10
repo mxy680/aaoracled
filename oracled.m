@@ -213,7 +213,14 @@ static Resp handleListKeys(void) {
 static Resp handleCreateKey(NSDictionary *body) {
     NSString *appId = body[@"appId"];
     NSString *env = body[@"environment"] ?: @"development";
-    NSData *cdh = b64d(body[@"clientDataHash"]);
+    // "sha256(keyId)" as a literal string: derive the hash from the keyId
+    // generateKey is about to return, for relying parties whose apps attest
+    // over SHA256(utf8(keyId)) instead of a server challenge — the hash
+    // can't be known before the key exists, so the daemon computes it.
+    id cdhIn = body[@"clientDataHash"];
+    BOOL deriveFromKeyId = [cdhIn isKindOfClass:NSString.class] &&
+        [cdhIn isEqualToString:@"sha256(keyId)"];
+    NSData *cdh = deriveFromKeyId ? nil : b64d(cdhIn);
     if (![appId isKindOfClass:NSString.class]) return Err(400, @"bad_request", @"appId required");
     // `?: @"development"` above does NOT cover a JSON `null`: that arrives as
     // NSNull, which is a live object and therefore truthy, so it sails past
@@ -227,7 +234,8 @@ static Resp handleCreateKey(NSDictionary *body) {
     if (![env isKindOfClass:NSString.class] ||
         ![@[@"development", @"production"] containsObject:env])
         return Err(400, @"bad_request", @"environment must be \"development\" or \"production\"");
-    if (cdh.length != 32) return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
+    if (!deriveFromKeyId && cdh.length != 32)
+        return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
 
     // Forge lever: tells the injected devicecheckd tweak (Tweak.x) which App
     // ID to present AND which environment to force for these calls,
@@ -241,6 +249,12 @@ static Resp handleCreateKey(NSDictionary *body) {
     NSError *err = nil;
     NSString *keyId = dcGenerateKey(&err);
     if (!keyId) { clearForgeAppId(); return Err(502, @"generateKey_failed", fullErrorDump(err)); }
+    if (deriveFromKeyId) {
+        NSData *kidBytes = [keyId dataUsingEncoding:NSUTF8StringEncoding];
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(kidBytes.bytes, (CC_LONG)kidBytes.length, digest);
+        cdh = [NSData dataWithBytes:digest length:CC_SHA256_DIGEST_LENGTH];
+    }
     NSData *att = dcAttest(keyId, cdh, &err);
     clearForgeAppId();
     if (!att) return Err(502, @"attestKey_failed", fullErrorDump(err));
@@ -248,9 +262,12 @@ static Resp handleCreateKey(NSDictionary *body) {
     // Nothing stored: this response is a one-time snapshot of what was just
     // minted, not a promise it's retrievable again under this same keyId
     // later — GET /keys addresses it by its own opaque label from here on.
+    // The clientDataHash echo lets the caller confirm the binding (and
+    // verify the derived value in "sha256(keyId)" mode).
     return R(201, @{
         @"keyId": keyId, @"appId": appId, @"environment": env,
         @"attestation": b64e(att), @"counter": @0,
+        @"clientDataHash": b64e(cdh),
     });
 }
 
