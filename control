@@ -1,6 +1,6 @@
 Package: xyz.regulad.aaoracled
 Name: aaoracled
-Version: 0.1.0
+Version: 0.2.0
 Architecture: iphoneos-arm64e
 Description: On-device App Attest oracle. Patches devicecheckd's DCClientHandler to accept a caller-supplied App ID for App Attest, regardless of the calling process's code-signing legitimacy, and installs the aaoracled CLI/daemon that drives DCAppAttestService directly via a REST API.
 Maintainer: regulad
