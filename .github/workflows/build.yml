@@ -11,11 +11,21 @@
 # Ghidra-derived offsets that are valid for exactly one dyld_shared_cache
 # build (iPad mini 4, iPadOS 15.8.8 / 19H422), and nothing here touches a
 # device.
+#
+# On a `v*` tag the `publish` job additionally ships the built .deb to the
+# Nexus apt repository that serves it to SRDs. See that job for the Nexus
+# specifics; the short version is that apt hosted repos take uploads through
+# the components REST API (not HTTP PUT), Nexus signs the Release file with a
+# key held repository-side (so no GPG material lives here), and the repo is
+# configured immutable, so a version can be published exactly once.
 name: Build
 
 on:
   push:
     branches: [master]
+    # Publishing is tag-driven: pushing master repeatedly would otherwise
+    # re-attempt the same version, which an immutable repo rejects anyway.
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -121,3 +131,145 @@ jobs:
           name: aaoracled-deb
           path: packages/*.deb
           if-no-files-found: error
+
+  # Ship the tagged build to the Nexus apt repository that SRDs install from.
+  #
+  # Gated on refs/tags/v* rather than on a branch, which is also what keeps
+  # the credential away from fork pull requests: a PR can never satisfy this
+  # condition, so it can never reach the `nexus-ios` environment the secrets
+  # are scoped to.
+  publish:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: nexus-ios
+
+    env:
+      # Both of these are already public (the repo is anonymously readable and
+      # the install URL is in the README), so they are plain config, not
+      # secrets. Only the deploy credential is sensitive.
+      NEXUS_BASE: https://repo.regulad.xyz
+      NEXUS_REPO: ios
+      NEXUS_DIST: stable
+      PKG: xyz.regulad.aaoracled
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Tag must match the packaged version
+        # The version SRDs receive comes from `control`, not from the tag, and
+        # openapi.yaml's contract version is kept in step with it. A mismatch
+        # would publish something whose version disagrees with the thing that
+        # named it, which an immutable repo then makes permanent.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CTRL="$(awk -F': ' '/^Version:/{print $2; exit}' control | tr -d '\r')"
+          API="$(awk -F': ' '/^  version:/{print $2; exit}' openapi.yaml | tr -d '\r')"
+          echo "tag=$TAG control=$CTRL openapi=$API"
+          [ "$TAG" = "$CTRL" ] || { echo "::error::tag v$TAG != control Version: $CTRL"; exit 1; }
+          [ "$TAG" = "$API" ] || { echo "::error::tag v$TAG != openapi info.version: $API"; exit 1; }
+
+      - name: Download the built package
+        uses: actions/download-artifact@v4
+        with:
+          name: aaoracled-deb
+          path: dist
+
+      - name: Resolve and sanity-check the .deb
+        id: deb
+        run: |
+          DEB="$(find dist -maxdepth 1 -name '*.deb' | sort -V | tail -1)"
+          [ -n "$DEB" ] || { echo "::error::no .deb in the build artifact"; exit 1; }
+          # theos appends an incrementing suffix to non-FINALPACKAGE builds.
+          # Such a version must never reach the public repo.
+          case "$DEB" in
+            *+debug*) echo "::error::refusing to publish a debug build: $DEB"; exit 1 ;;
+          esac
+          echo "path=$DEB" >> "$GITHUB_OUTPUT"
+          echo "::notice::publishing $(basename "$DEB")"
+
+      - name: Refuse to clobber an already-published version
+        # The repository is immutable (the deploy role deliberately has no
+        # -edit privilege), so a duplicate would fail server-side regardless.
+        # Checking first turns that into a clear message instead of a 400 from
+        # the middle of an upload, and validates the credential before we rely
+        # on it.
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          N="$(curl -fsS -u "$NEXUS_USERNAME:$NEXUS_PASSWORD" \
+                "$NEXUS_BASE/service/rest/v1/search?repository=$NEXUS_REPO&name=$PKG&version=$V" \
+                | jq '.items | length')"
+          echo "existing components for $PKG $V: $N"
+          [ "$N" -eq 0 ] || {
+            echo "::error::$PKG $V is already published; bump the version rather than re-tagging"
+            exit 1
+          }
+
+      - name: Upload to Nexus
+        # apt hosted repositories do not accept direct HTTP PUT (unlike
+        # maven2/raw/yum) — the supported route is a multipart POST to the
+        # components API with the format-specific `apt.asset` field. A
+        # successful upload is 204 No Content, with no body.
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          CODE="$(curl -sS -o resp.txt -w '%{http_code}' \
+            -u "$NEXUS_USERNAME:$NEXUS_PASSWORD" \
+            -X POST "$NEXUS_BASE/service/rest/v1/components?repository=$NEXUS_REPO" \
+            -H 'accept: application/json' \
+            -F "apt.asset=@${{ steps.deb.outputs.path }}")"
+          echo "HTTP $CODE"
+          head -c 2000 resp.txt || true
+          echo
+          case "$CODE" in
+            204) echo "::notice::upload accepted" ;;
+            500) echo "::error::500 — check the repository's PGP signing key (AptSigningFacet)"; exit 1 ;;
+            40*) echo "::error::$CODE — credential or privilege problem, or duplicate version"; exit 1 ;;
+            *)   echo "::error::unexpected HTTP $CODE"; exit 1 ;;
+          esac
+
+      - name: Verify it is actually installable
+        # A 204 means "stored", not "installable": Nexus rebuilds the apt
+        # indexes asynchronously after an upload, so the only thing that
+        # proves an SRD can see the package is the Packages index itself.
+        # Components/architectures are read out of Release rather than
+        # assumed, so this keeps working if either changes.
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          ROOT="$NEXUS_BASE/repository/$NEXUS_REPO/dists/$NEXUS_DIST"
+
+          fetch_packages() {
+            curl -fsS "$1/Packages" 2>/dev/null && return 0
+            curl -fsS "$1/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null && return 0
+            return 1
+          }
+
+          for attempt in $(seq 1 12); do
+            REL="$(curl -fsS "$ROOT/Release" 2>/dev/null || true)"
+            if [ -n "$REL" ]; then
+              COMPS="$(echo "$REL" | awk -F': ' '/^Components:/{print $2; exit}')"
+              ARCHS="$(echo "$REL" | awk -F': ' '/^Architectures:/{print $2; exit}')"
+              echo "attempt $attempt: components=[$COMPS] architectures=[$ARCHS]"
+              for c in $COMPS; do
+                for a in $ARCHS; do
+                  if fetch_packages "$ROOT/$c/binary-$a" \
+                       | grep -A25 "^Package: $PKG$" \
+                       | grep -q "^Version: $V$"; then
+                    echo "::notice::$PKG $V live in $NEXUS_DIST/$c/binary-$a"
+                    exit 0
+                  fi
+                done
+              done
+            else
+              echo "attempt $attempt: Release not readable yet"
+            fi
+            sleep 10
+          done
+
+          echo "::error::uploaded but $PKG $V never appeared in the apt index (2 min)"
+          exit 1
