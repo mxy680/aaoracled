@@ -160,6 +160,18 @@ static Resp handleCreateKey(NSDictionary *body) {
     NSString *env = body[@"environment"] ?: @"development";
     NSData *cdh = b64d(body[@"clientDataHash"]);
     if (![appId isKindOfClass:NSString.class]) return Err(400, @"bad_request", @"appId required");
+    // `?: @"development"` above does NOT cover a JSON `null`: that arrives as
+    // NSNull, which is a live object and therefore truthy, so it sails past
+    // the default and lands in `env` — as would a number, array or dict from
+    // a malformed body. Today that only reaches the echoed 201 field, but it
+    // is also the value the forge channel will carry once `environment` is
+    // actually plumbed through to devicecheckd, where a non-string would be
+    // %@-formatted into the forge file as something like "<null>". Validate
+    // the shape AND the domain here, at the edge, rather than letting a
+    // nonsense environment travel any further.
+    if (![env isKindOfClass:NSString.class] ||
+        ![@[@"development", @"production"] containsObject:env])
+        return Err(400, @"bad_request", @"environment must be \"development\" or \"production\"");
     if (cdh.length != 32) return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
 
     // Forge lever: tells the injected devicecheckd tweak (Tweak.x)
