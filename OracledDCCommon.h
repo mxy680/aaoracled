@@ -28,14 +28,44 @@
 // NOT need this fix — it runs unsandboxed (no-sandbox entitlement), so both
 // path spellings already resolve to the same file for it.
 //
-// Contents: LINE 1 is the App ID (<TeamID>.<BundleID>) to force for the NEXT
-// App Attest call devicecheckd handles. Presence of line 1 = override active;
-// absence of the file = pass through to the real (audit-token-derived)
-// identity. Any further lines are reserved for future per-request fields and
-// are ignored by this revision — see OracledForcedAppID() on why line 1 is
-// parsed out rather than the whole file being used verbatim.
+// Contents: a PROPERTY LIST dictionary (written binary, but
+// +dictionaryWithContentsOfFile: reads XML just as happily, so a
+// hand-written XML plist works for manual testing). Keys below. A readable
+// dictionary carrying a non-empty appId = override active; a missing,
+// unreadable, or non-dictionary file = pass through to the real
+// (audit-token-derived) identity.
+//
+// This was a bare line-oriented text file until 2026-10-10. A plist removes a
+// whole class of fragility that bit this project repeatedly: no trailing
+// newline to strip, no CRLF hazard from a file touched on a non-Unix host, no
+// ambiguity about what a second line means, and no silent truncation when a
+// field needs to grow. Malformed input now fails as "nil dictionary" —
+// unambiguously "no override" — rather than being interpreted as a
+// legitimate-but-wrong App ID.
+//
+// The PATH deliberately keeps its historical `.txt` spelling even though the
+// contents are now a plist. libSandy's grant
+// (layout/Library/libSandy/OracledDCPatch.plist) is path-EXACT, and getting
+// that grant to resolve correctly through roothide's jbroot()-ing fork cost
+// this project a full day once already. Renaming the file means editing the
+// grant too, and a grant that silently stops matching presents as "the forge
+// mysteriously does nothing" — indistinguishable from the mechanism being
+// broken. Not worth the cosmetics; rename it only alongside a deliberate
+// on-device re-verification of the sandbox grant.
 #define kOracledForgePath \
     jbroot(@"/var/mobile/Library/Preferences/xyz.regulad.aaoracled.forge-appid.txt")
+
+// Keys inside the forge plist. Shared by both sides — never re-spell these as
+// literals in oracled.m or Tweak.x (see the drift lesson in AGENTS.md).
+static NSString *const kOracledForgeKeyAppID = @"appId";
+// RESERVED, not yet consumed. The App Attest environment is NOT selected by
+// any entitlement devicecheckd reads off the caller — confirmed by live trace
+// on 2026-10-10 (iPad5,1 / 19H422): across isSupported and generateKey,
+// `com.apple.developer.devicecheck.appattest-environment` is never read from
+// the caller's SecTask, and -entitlements is never sent to the bundle record
+// at all. Nothing should write or read this key until the real lever is
+// identified, so that the plist never advertises a knob that does nothing.
+static NSString *const kOracledForgeKeyEnvironment = @"environment";
 
 // Sentinels smuggled through Assert's existing keyId param (same channel
 // used by AppAttestInternal's own hidden __debug_aa_kc_list__/
@@ -56,20 +86,20 @@ static inline NSString *OracledForcedAppID(void) {
     // hardcode a value here for a "quick test" and leave it in — do it
     // deliberately, for one test, then revert immediately (learned this the
     // hard way — see AGENTS.md history).
-    NSString *s = [NSString stringWithContentsOfFile:kOracledForgePath
-                                             encoding:NSUTF8StringEncoding error:nil];
-    // LINE 1 ONLY, trimmed. Returning the whole file verbatim made the forced
-    // App ID hostage to the file's exact byte layout: a trailing newline, a
-    // CRLF from a file hand-edited on a non-Unix host, or any future second
-    // line would all be smuggled into the identity string itself and break
-    // every identity check downstream — silently, since a forced App ID that
-    // doesn't match anything just looks like the forge not working. Parse out
-    // line 1 and trim it so this stays correct whether the file is the
-    // historical single bare line, a single line with a trailing newline, or
-    // gains further reserved lines later. nil/empty file still means "no
-    // override" (componentsSeparatedByString: on nil yields nil; .length on
-    // nil is 0).
-    NSString *appId = [[s componentsSeparatedByString:@"\n"].firstObject
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    // A non-plist, truncated, or otherwise unreadable file yields nil here,
+    // which reads as "no override" — the safe direction. The old text format
+    // had no such distinction: any bytes at all were taken as an App ID, so a
+    // corrupt file forged a garbage identity instead of standing down.
+    NSDictionary *forge = [NSDictionary dictionaryWithContentsOfFile:kOracledForgePath];
+    if (![forge isKindOfClass:NSDictionary.class]) return nil;
+
+    NSString *appId = forge[kOracledForgeKeyAppID];
+    if (![appId isKindOfClass:NSString.class]) return nil;
+    // Trimmed defensively: a hand-edited plist can still carry stray
+    // whitespace inside the <string>, and an App ID never legitimately has
+    // any. Everything else that used to need parsing is now the plist
+    // reader's problem, not ours.
+    appId = [appId stringByTrimmingCharactersInSet:
+                 NSCharacterSet.whitespaceAndNewlineCharacterSet];
     return appId.length ? appId : nil;
 }

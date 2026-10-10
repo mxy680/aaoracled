@@ -140,6 +140,17 @@ identity claim).
   file exists, not just the request under test. Write it immediately before
   a test call, delete it (or let `oracled.m`'s `clearForgeAppId()` do so)
   immediately after. Never leave it set between sessions.
+- That file is a **property list**, not line-oriented text (changed
+  2026-10-10). Keys are defined once in `OracledDCCommon.h`
+  (`kOracledForgeKeyAppID`, and `kOracledForgeKeyEnvironment` which is
+  RESERVED and deliberately unread) — reference those constants, never
+  re-spell the key strings. A malformed or truncated file now parses as nil
+  and reads as "no override", instead of the old behavior where any bytes at
+  all became a forged App ID. The filename keeps its historical `.txt`
+  spelling on purpose: libSandy's grant is path-exact, so renaming means
+  editing `layout/Library/libSandy/OracledDCPatch.plist` too and re-verifying
+  the sandbox grant on-device — and a grant that stops matching presents
+  exactly like a broken forge.
 - Both `%hook LSBundleRecord` selectors (`bundleRecordForAuditToken:error:`
   — public, 2-arg — and `_bundleRecordForAuditToken:checkNSBundleMainBundle:error:`
   — private, 3-arg) must be hooked; `AppAttest_AppAttestation_IsEligibleApplication`

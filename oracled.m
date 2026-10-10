@@ -60,7 +60,32 @@ static NSString *const kOwnLabel = @"xyz.regulad.aaoracled (no fixed App ID — 
 // call. Cleared immediately after so an un-forged process elsewhere on the
 // device isn't affected by a stale override.
 static void setForgeAppId(NSString *appId) {
-    [appId writeToFile:kOracledForgePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // Written as a binary plist (see OracledDCCommon.h for the key names and
+    // for why the path keeps its historical `.txt` spelling). Binary rather
+    // than XML purely so a partially-flushed file cannot look like a valid
+    // document with a plausible-but-wrong value in it — a truncated binary
+    // plist fails to parse outright, and the reader treats that as "no
+    // override", which is the safe direction.
+    NSError *err = nil;
+    NSData *data = [NSPropertyListSerialization
+        dataWithPropertyList:@{ kOracledForgeKeyAppID: appId }
+                      format:NSPropertyListBinaryFormat_v1_0
+                     options:0
+                       error:&err];
+    if (!data) {
+        NSLog(@"[aaoracled] FATAL: could not serialize forge plist: %@", err);
+        return;
+    }
+    // Atomic so devicecheckd never reads a half-written file: this lands in a
+    // temp file and renames into place, and the rename target is the exact
+    // path libSandy granted.
+    if (![data writeToFile:kOracledForgePath
+                   options:NSDataWritingAtomic
+                     error:&err]) {
+        NSLog(@"[aaoracled] FATAL: could not write forge plist to %@: %@",
+              kOracledForgePath, err);
+        return;
+    }
     chmod(kOracledForgePath.UTF8String, 0666);
 }
 static void clearForgeAppId(void) {
