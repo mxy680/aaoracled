@@ -239,6 +239,60 @@ Keys are standard base64 (RFC 4648 §4, i.e. `+`/`/`/`=`, not URL-safe) plus
 a literal `:` separator — percent-encode the whole value when putting one
 in a URL path (`/` in particular must become `%2F`).
 
+### Environment selection (dev vs prod / the AAGUID) — settled 2026-10-10
+
+The App Attest environment is chosen by **one** private function, and it is
+NOT chosen by the fake bundle record's `entitlements` dictionary (that
+dictionary is never read — `-entitlements` is never even sent to the record
+on the create path).
+
+`generateEnvironmentByAppSigning(audit_token_t *)`, AppAttestInternal
+`+0x8244` (static/unslid `0x1c32d1244` on iPad5,1 / 19H422). It returns an
+int in `x0`, and that return value alone decides the environment:
+
+| return | environment |
+|--------|-------------|
+| `0`    | development |
+| `1`    | production  |
+
+Verified by overriding the return live with Frida: forcing `0` where the
+natural answer was `1` flipped the minted credential's label from `=p:` to
+`=d:`. Two internal paths reach that return:
+
+1. **Record path.** `[LSBundleRecord bundleRecordForAuditToken:error:]` —
+   the selector the tweak already hooks — then `isKindOfClass:
+   LSApplicationRecord`, then `-isProfileValidated`, `-isUPPValidated`, and
+   `-isBeta`. A caller whose profile is NOT validated yields production
+   (`+0x8410` → `mov w21, #1`); this is why ordinary jailbreak-signed apps
+   mint production keys.
+2. **SecTask fallback**, taken when the record is nil or not an
+   `LSApplicationRecord`. `SecTaskCreateWithAuditToken` on the caller's
+   token, then `SecTaskCopyValueForEntitlement` for
+   `com.apple.developer.devicecheck.appattest-environment`
+   (symbol `kAAAppAttestationEnvironmentOverride`), `caseInsensitiveCompare:`
+   against `@"production"` / `@"development"` (symbols
+   `KAAAppAttestationEnvironment{Production,Development}`). This is the path
+   `entitlements.plist`'s own note describes, and it is the path **aaoracled
+   itself** takes when unforged: aaoracled is a bare binary with no installed
+   app bundle, so LaunchServices has no record for it, the record path bails,
+   and its hardcoded `development` entitlement decides.
+
+**Hook the return value, not either input.** Overriding
+`generateEnvironmentByAppSigning`'s return sits downstream of *both* paths,
+so it works regardless of whether a bundle record exists, what the fake
+record answers for the validator selectors, or what entitlement the caller
+carries. Driving it from the inputs instead means modelling that whole
+branch tree — and note the fake record's `isProfileValidated`/
+`isUPPValidated` overrides (added purely to stop an LSRecord getter from
+hard-faulting) are themselves load-bearing for environment as a side
+effect, which is the kind of coupling worth not depending on.
+
+**The environment is observable for free.** It is baked into the credential
+keychain label's `p`/`d` character at `generateKey` time (see
+`openapi.yaml`'s `Key` schema), so `GET /keys` can report it per key with no
+attestation and no network. That is the cheapest possible verification
+surface for any environment work — one request, no CA involvement.
+
 ### Testing discipline
 
 - Hardcode `OracledForcedAppID()`'s return value (or leave the forge file
@@ -386,7 +440,31 @@ device/build documented directly above the `#define`s — verify against
 AAI_STATIC_getAllCredentialKeychainLabels
 AAI_STATIC_copy_keychain_item
 AAI_STATIC_deleteCredentialKeychainWithLabel
+AAI_STATIC_generateEnvironmentByAppSigning   // 0x1c32d1244 — see
+                                             // "Environment selection" above
 ```
+
+Two Frida notes worth not re-learning, both from the 2026-10-10 session:
+
+- **Private symbols resolve without Ghidra.** `DebugSymbol.fromAddress()`
+  names non-exported AppAttestInternal functions on this build
+  (`generateEnvironmentByAppSigning`, `extractApplicationIdentifiers`,
+  `saveCredentialKeychain`, `isNSString`, …) even though
+  `Module.enumerateSymbols()` returns almost nothing. Disassembling an
+  exported entry point and naming its `bl` targets is therefore a fast way to
+  map a call chain — that is how the environment function was located, in one
+  pass, with the Ghidra MCP server unavailable. Data symbols resolve too, which
+  is how the entitlement-key constant was identified by name.
+- **Never `new ObjC.Object(p)` on a pointer that might not be an object.**
+  `$className` dereferences the isa and SIGSEGVs the process — `launchctl
+  list` then shows exit status `-11`. This killed devicecheckd twice: once on
+  an `audit_token_t *` argument, once on raw string/data-slot addresses. It is
+  NOT catchable by a JS try/catch. Read C strings with `readUtf8String()` (no
+  length argument — a fixed-length read spans NULs into neighbouring literals
+  and corrupts the result) and decode CFString constants by hand from the
+  `__CFConstantString` layout (`const char *` at `+16`, length at `+24`).
+  devicecheckd is launched on demand, so a crash is recoverable, but it costs
+  a round trip and invalidates whatever trace was in flight.
 
 ## Other infra lessons (costly to re-learn)
 
