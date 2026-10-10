@@ -28,9 +28,12 @@
 // NOT need this fix — it runs unsandboxed (no-sandbox entitlement), so both
 // path spellings already resolve to the same file for it.
 //
-// Contents: a single line, the App ID (<TeamID>.<BundleID>) to force for the
-// NEXT App Attest call devicecheckd handles. Presence of the file = override
-// active; absence = pass through to the real (audit-token-derived) identity.
+// Contents: LINE 1 is the App ID (<TeamID>.<BundleID>) to force for the NEXT
+// App Attest call devicecheckd handles. Presence of line 1 = override active;
+// absence of the file = pass through to the real (audit-token-derived)
+// identity. Any further lines are reserved for future per-request fields and
+// are ignored by this revision — see OracledForcedAppID() on why line 1 is
+// parsed out rather than the whole file being used verbatim.
 #define kOracledForgePath \
     jbroot(@"/var/mobile/Library/Preferences/xyz.regulad.aaoracled.forge-appid.txt")
 
@@ -55,5 +58,18 @@ static inline NSString *OracledForcedAppID(void) {
     // hard way — see AGENTS.md history).
     NSString *s = [NSString stringWithContentsOfFile:kOracledForgePath
                                              encoding:NSUTF8StringEncoding error:nil];
-    return s.length ? s : nil;
+    // LINE 1 ONLY, trimmed. Returning the whole file verbatim made the forced
+    // App ID hostage to the file's exact byte layout: a trailing newline, a
+    // CRLF from a file hand-edited on a non-Unix host, or any future second
+    // line would all be smuggled into the identity string itself and break
+    // every identity check downstream — silently, since a forced App ID that
+    // doesn't match anything just looks like the forge not working. Parse out
+    // line 1 and trim it so this stays correct whether the file is the
+    // historical single bare line, a single line with a trailing newline, or
+    // gains further reserved lines later. nil/empty file still means "no
+    // override" (componentsSeparatedByString: on nil yields nil; .length on
+    // nil is 0).
+    NSString *appId = [[s componentsSeparatedByString:@"\n"].firstObject
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return appId.length ? appId : nil;
 }
