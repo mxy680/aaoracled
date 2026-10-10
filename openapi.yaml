@@ -306,7 +306,16 @@ components:
       properties:
         clientDataHash:
           allOf: [{ $ref: "#/components/schemas/Base64" }]
-          description: Arbitrary 32-byte hash to sign directly (no App Attest semantics).
+          description: >-
+            Arbitrary bytes to sign directly (no App Attest semantics),
+            1..4096 bytes. Historically required to be exactly 32 bytes; the
+            tweak's raw-label sign path signs arbitrary input with the SEP key
+            using the ECDSA *message* algorithm (which hashes its input before
+            signing), so the cap is lifted. A full assertion message
+            (`authData || clientDataHash`, typically 69 bytes) can therefore be
+            signed here to assemble a complete assertion client-side — the
+            32-byte-only form could only ever produce a signature over
+            `SHA256(clientDataHash)`, which is not the assertion construction.
       required: [clientDataHash]
 
     SignResponse:

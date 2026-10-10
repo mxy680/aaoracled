@@ -186,8 +186,20 @@ static Resp handleSignKey(NSString *key, NSDictionary *body) {
     NSData *cdh = b64d(body[@"clientDataHash"]);
     if (key.length == 0)
         return Err(400, @"bad_request", @"key required in path (from GET /keys)");
-    if (cdh.length != 32)
-        return Err(400, @"bad_request", @"clientDataHash must be 32 bytes (base64)");
+    // Arbitrary length, not just 32 bytes: the tweak's raw-label sign path
+    // (OracledHandleSignArbitraryKey) signs whatever bytes it is handed with
+    // the SEP key via kSecKeyAlgorithmECDSASignatureMessageX962SHA256 — the
+    // *Message* variant, which SHA-256s its input itself before signing. So a
+    // full App Attest assertion message (authData || clientDataHash,
+    // typically 69 bytes) handed in here yields a signature over
+    // SHA256(authData || clientDataHash), which is exactly the real assertion
+    // construction. The old 32-byte-only check was a web-layer assumption
+    // inherited from clientDataHash conventions, and was the only thing
+    // standing between this endpoint and assembling complete assertions
+    // client-side (counter managed by the caller). Upper bound is purely
+    // defensive; the HTTP body reader itself has no cap of its own.
+    if (cdh.length == 0 || cdh.length > 4096)
+        return Err(400, @"bad_request", @"clientDataHash must be 1..4096 bytes (base64)");
 
     NSString *sentinelKeyId = [kOracledRawLabelSignPrefix stringByAppendingString:key];
     NSError *err = nil;
