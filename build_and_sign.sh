@@ -19,6 +19,32 @@ export PATH="$THEOS/toolchain/linux/iphone/bin:/usr/local/sbin:/usr/local/bin:$P
 command -v ldid >/dev/null || { echo "ldid not on PATH (need login shell / theos toolchain)"; exit 1; }
 [ -d "$THEOS" ] || { echo "THEOS not found at $THEOS"; exit 1; }
 
+# Prefer real dpkg-deb over theos' bundled dm.pl.
+#
+# theos defaults to dm.pl unconditionally (`_THEOS_PLATFORM_DPKG_DEB ?= dm.pl`
+# in makefiles/package/deb.mk) — it never probes for dpkg-deb. Two reasons to
+# override that when dpkg-deb exists:
+#
+#   * dm.pl's child processes lose FAKEROOTKEY under theos' own fakeroot.sh
+#     wrapper (at least on Fedora/WSL), so packaging dies with
+#     "libfakeroot: connect: Permission denied" and SIGPIPE, surfacing as
+#     `make: *** [deb.mk:79: internal-package] Error 141`. Everything up to
+#     and including signing succeeds, which makes it look like a build
+#     failure when it is purely a packaging one.
+#   * dm.pl emits data.tar.lzma, which current dpkg-deb cannot read back (the
+#     CI workflow already degrades to `ar` for its smoke check because of it).
+#
+# Both variables are `?=` in deb.mk, so exporting them here takes precedence.
+# Install dpkg (Fedora: `sudo dnf install dpkg`) to get this path.
+if command -v dpkg-deb >/dev/null; then
+    export _THEOS_PLATFORM_DPKG_DEB=dpkg-deb
+    # theos defaults the compression to lzma, which dpkg-deb >= 1.21 dropped.
+    export THEOS_PLATFORM_DEB_COMPRESSION_TYPE="${THEOS_PLATFORM_DEB_COMPRESSION_TYPE:-xz}"
+    echo ">> packaging with dpkg-deb (compression: $THEOS_PLATFORM_DEB_COMPRESSION_TYPE)"
+else
+    echo ">> dpkg-deb not found; falling back to theos' dm.pl" >&2
+fi
+
 # theos' `make package` needs correct DEBIAN dir perms (<=0775), which the
 # Windows/DrvFs 9p mount at /mnt/d does not reliably preserve via chmod. Build
 # in a native WSL filesystem copy, then ship the .deb back out.
