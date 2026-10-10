@@ -1,0 +1,50 @@
+# Line endings: LF everywhere, in the index AND in the working tree, no
+# matter what the cloning machine's core.autocrlf is set to.
+#
+# This is not cosmetic here. The build runs on Linux/macOS (theos) — on
+# Windows, inside WSL against a checkout that may live on an NTFS path — and
+# several tracked files break outright, not merely look untidy, if they are
+# checked out with CRLF:
+#
+#   * build_and_sign.sh      — a CRLF shebang line makes the kernel look for
+#                              an interpreter named "/bin/bash\r"
+#   * layout/DEBIAN/postinst — same, and it fails at install time on-device,
+#                              where it is least convenient to debug
+#   * Makefile               — theos' own included makefiles and recipe lines
+#                              are whitespace-sensitive
+#   * control                — dpkg control fields are parsed line-wise
+#
+# `text=auto` still lets git detect genuinely binary content and leave it
+# untouched, so this is safe as a blanket default; `eol=lf` is the part that
+# overrides a local core.autocrlf=true on checkout.
+* text=auto eol=lf
+
+# Spelled out for the extensionless and build-critical files above, so the
+# intent survives anyone narrowing the glob later.
+build_and_sign.sh      text eol=lf
+fixtures/appa/build_and_sign.sh text eol=lf
+layout/DEBIAN/postinst text eol=lf
+Makefile               text eol=lf
+fixtures/appa/Makefile text eol=lf
+control                text eol=lf
+
+# Sources and data consumed by `\n`-oriented parsers.
+*.x      text eol=lf
+*.m      text eol=lf
+*.h      text eol=lf
+*.c      text eol=lf
+*.py     text eol=lf
+*.sh     text eol=lf
+*.plist  text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.md     text eol=lf
+*.pem    text eol=lf
+
+# Build output and key material are gitignored, but mark the formats binary
+# anyway so an accidental `git add -f` cannot mangle them.
+*.deb binary
+*.png binary
+*.jpg binary
+*.p12 binary
+*.mobileprovision binary
